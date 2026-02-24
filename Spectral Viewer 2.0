@@ -1,0 +1,259 @@
+# -*- coding: utf-8 -*-
+"""
+@author: Michael J. Carrillo
+"""
+
+import sys
+import os
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+
+# -----------------------------------------------------------------------------
+# ROBUST DATA READER (Now with LogInt Detection)
+# -----------------------------------------------------------------------------
+def parse_file_content(filename):
+    x_list = []
+    y_list = []
+    is_log_scale = False
+    
+    if not filename: return np.array([]), np.array([])
+    
+    try:
+        with open(filename, 'r', errors='ignore') as f:
+            # Read all lines
+            lines = f.readlines()
+            
+            # 1. Check for "LogInt" header in the first 20 lines
+            for line in lines[:20]:
+                if "LogInt" in line or "Log Int" in line:
+                    is_log_scale = True
+                    break
+            
+            # 2. Parse Data
+            for line in lines:
+                line = line.strip()
+                if not line: continue 
+                
+                # Replace commas and split
+                parts = line.replace(',', ' ').split()
+                
+                # Need at least 2 columns (Freq, Intensity)
+                if len(parts) < 2: continue
+                
+                try:
+                    # Try converting first two columns to float
+                    val_x = float(parts[0])
+                    val_y = float(parts[1])
+                    
+                    x_list.append(val_x)
+                    y_list.append(val_y)
+                except ValueError:
+                    # If conversion fails (text headers, dates, etc.), skip line
+                    continue
+                    
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return np.array([]), np.array([])
+
+    x_arr = np.array(x_list)
+    y_arr = np.array(y_list)
+
+    # 3. Convert Logarithmic Intensity to Linear if detected
+    #    Formula: Intensity = 10 ^ LogInt
+    if is_log_scale and len(y_arr) > 0:
+        # We only convert if it looks like a prediction file (LogInt header)
+        try:
+            y_arr = 10.0 ** y_arr
+            print(f"Converted Logarithmic Intensities in {os.path.basename(filename)}")
+        except:
+            pass # Keep original if math fails
+
+    return x_arr, y_arr
+
+# -----------------------------------------------------------------------------
+# MAIN APP
+# -----------------------------------------------------------------------------
+class SpectrumApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Universal Spectrum Plotter - Exp vs Pred")
+        self.geometry("1100x800")
+
+        self.top_x, self.top_y = [], []
+        self.bot_x, self.bot_y = [], []
+        
+        self.selections = []      
+        self.selected_freqs = []  
+
+        # --- 1. Top Controls ---
+        frame_controls = tk.Frame(self, bg="#f0f0f0", bd=1, relief="raised")
+        frame_controls.pack(side=tk.TOP, fill=tk.X)
+
+        btn_top = tk.Button(frame_controls, text="Load Exp (Top)", command=self.load_top, bg="white", height=2)
+        btn_top.pack(side=tk.LEFT, padx=10, pady=10)
+
+        btn_bot = tk.Button(frame_controls, text="Load Pred (Bottom)", command=self.load_bot, bg="white", height=2)
+        btn_bot.pack(side=tk.LEFT, padx=10, pady=10)
+
+        btn_clear = tk.Button(frame_controls, text="Clear Lines", command=self.clear_lines, bg="#ffcccc", height=2)
+        btn_clear.pack(side=tk.RIGHT, padx=10, pady=10)
+
+        self.lbl_info = tk.Label(frame_controls, text="Load your .freq file into 'Bottom' to see sticks.", 
+                                 bg="#f0f0f0", fg="#333333")
+        self.lbl_info.pack(side=tk.LEFT, padx=10)
+
+        # --- 2. Plot Area ---
+        frame_plot = tk.Frame(self)
+        frame_plot.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.fig = Figure(figsize=(8, 5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_xlabel("Frequency (MHz)")
+        self.ax.set_ylabel("Intensity")
+        self.ax.grid(True, linestyle="--", alpha=0.3)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=frame_plot)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.toolbar = NavigationToolbar2Tk(self.canvas, frame_plot)
+        self.toolbar.update()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.canvas.mpl_connect("button_press_event", self.on_click)
+
+        # --- 3. Bottom Log Box ---
+        frame_bottom = tk.Frame(self, bg="#e1e1e1", height=150)
+        frame_bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        lbl_log = tk.Label(frame_bottom, text="Measurement Log:", bg="#e1e1e1", font=("Arial", 10, "bold"))
+        lbl_log.pack(side=tk.TOP, anchor="w", padx=10, pady=2)
+
+        self.log_list = tk.Listbox(frame_bottom, height=6, font=("Courier", 10))
+        scrollbar = tk.Scrollbar(frame_bottom, orient="vertical", command=self.log_list.yview)
+        self.log_list.config(yscrollcommand=scrollbar.set)
+        
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        btn_copy = tk.Button(frame_bottom, text="Copy Log", command=self.copy_to_clipboard, bg="#ddffdd")
+        btn_copy.pack(side=tk.RIGHT, padx=10, pady=10)
+        
+        btn_clear_log = tk.Button(frame_bottom, text="Clear Log", command=self.clear_log, bg="#ffdddd")
+        btn_clear_log.pack(side=tk.RIGHT, padx=5, pady=10)
+
+    # ---------------------------------------------------------
+    # LOADING
+    # ---------------------------------------------------------
+    def load_top(self):
+        fname = filedialog.askopenfilename(title="Select Experimental File", filetypes=[("All Files", "*.*")])
+        if fname:
+            x, y = parse_file_content(fname)
+            if len(x) > 0:
+                self.top_x, self.top_y = x, y
+                self.lbl_info.config(text=f"Loaded Top: {os.path.basename(fname)}")
+                self.redraw_plot()
+
+    def load_bot(self):
+        fname = filedialog.askopenfilename(title="Select Prediction File", filetypes=[("All Files", "*.*")])
+        if fname:
+            x, y = parse_file_content(fname)
+            if len(x) > 0:
+                self.bot_x, self.bot_y = x, y
+                self.lbl_info.config(text=f"Loaded Bottom: {os.path.basename(fname)}")
+                self.redraw_plot()
+
+    def redraw_plot(self):
+        self.ax.clear()
+        
+        # Plot Top (Black, Positive)
+        if len(self.top_x) > 0:
+            y_norm = self.top_y / np.max(self.top_y)
+            self.ax.plot(self.top_x, y_norm, color="black", lw=1.0, label="Experimental")
+
+        # Plot Bottom (Red, Negative/Mirrored)
+        if len(self.bot_x) > 0:
+            # Safety: handle case where all intensities are 0
+            if np.max(self.bot_y) != 0:
+                y_norm = self.bot_y / np.max(self.bot_y)
+            else:
+                y_norm = self.bot_y
+                
+            for f, i in zip(self.bot_x, y_norm):
+                # Plot sticks downwards
+                self.ax.vlines(f, 0, -i, color="red", linewidth=1.2)
+            
+            # Set fixed Y limits to show mirror effect
+            self.ax.set_ylim(-1.1, 1.1)
+        
+        self.ax.axhline(0, color='gray', linewidth=0.8)
+        self.ax.grid(True, linestyle="--", alpha=0.3)
+        self.ax.set_xlabel("Frequency (MHz)")
+        self.canvas.draw()
+
+    # ---------------------------------------------------------
+    # CLICK LOGIC (Every 2nd click = Doppler Calculation)
+    # ---------------------------------------------------------
+    def on_click(self, event):
+        if event.inaxes != self.ax: return
+        
+        if event.button == 3: # Right Click
+            freq = event.xdata
+            
+            # 1. Draw the Line
+            line = self.ax.axvline(x=freq, color='green', linewidth=1.5, alpha=0.8)
+            self.selections.append(line)
+            
+            t = self.ax.text(freq, 0.05, f"{freq:.4f}", rotation=90, color="green", 
+                             verticalalignment='bottom', backgroundcolor='white')
+            self.selections.append(t)
+            
+            self.selected_freqs.append(freq)
+            
+            # 2. Check Pair
+            if len(self.selected_freqs) % 2 == 0:
+                f2 = self.selected_freqs[-1] 
+                f1 = self.selected_freqs[-2]
+                
+                center_freq = (f1 + f2) / 2.0
+                doppler_split = abs(f1 - f2)
+                
+                # A. Show on Plot
+                msg = f"Center: {center_freq:.4f}\nSplit: {doppler_split:.4f}"
+                t_lbl = self.ax.text(center_freq, 0.5, msg, 
+                                     color="blue", fontweight="bold", 
+                                     ha="center", va="bottom",
+                                     bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="blue"))
+                self.selections.append(t_lbl)
+                
+                # B. Add to Log Box
+                log_entry = f"Center: {center_freq:.4f} | Split: {doppler_split:.4f}  (F1: {f1:.4f}, F2: {f2:.4f})"
+                self.log_list.insert(tk.END, log_entry)
+                self.log_list.yview(tk.END)
+                
+            self.canvas.draw()
+
+    def clear_lines(self):
+        for artist in self.selections:
+            artist.remove()
+        self.selections = []
+        self.selected_freqs = []
+        self.canvas.draw()
+
+    def clear_log(self):
+        self.log_list.delete(0, tk.END)
+
+    def copy_to_clipboard(self):
+        items = self.log_list.get(0, tk.END)
+        text_to_copy = "\n".join(items)
+        self.clipboard_clear()
+        self.clipboard_append(text_to_copy)
+        self.update()
+
+if __name__ == "__main__":
+    app = SpectrumApp()
+    app.mainloop()
